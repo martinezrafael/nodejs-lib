@@ -6,8 +6,17 @@ const path = process.argv;
 const link = path[2];
 
 fs.readFile(link, "utf-8", (err, text) => {
-  verificaPalavrasDuplicadas(text);
+  quebraEmParagrafos(text);
+  // verificaPalavrasDuplicadas(text);
 });
+
+function quebraEmParagrafos(text) {
+  const paragrafos = text.toLowerCase().split("\n");
+  const contagem = paragrafos.map((paragrafo) => {
+    return verificaPalavrasDuplicadas(paragrafo);
+  });
+  console.log(contagem);
+}
 
 // criar um array com as palavras
 // contar as ocorrencias
@@ -25,5 +34,5 @@ function verificaPalavrasDuplicadas(text) {
     resultado[palavra] = (resultado[palavra] || 0) + 1;
   });
 
-  console.log(resultado);
+  return resultado;
 }
