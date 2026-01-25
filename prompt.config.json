@@ -1,0 +1,36 @@
+{
+  "detailLevel": "médio",
+  "postLength": "médio",
+  "tone": "profissional e técnico",
+  "audience": "desenvolvedores",
+  "language": "pt-BR",
+
+  "useEmojis": true,
+  "emojiDensity": "baixo",
+
+  "useHashtags": true,
+  "hashtags": {
+    "mode": "mixed",
+    "fixed": ["#NodeJS", "#LinkedIn", "#Automacao"],
+    "max": 6
+  },
+
+  "useTitle": true,
+  "useBulletPoints": true,
+  "maxBulletPoints": 5,
+  "includeNextSteps": true,
+  "includeCallToAction": true,
+  "callToActionText": "O que você faria diferente?",
+
+  "technicalDepth": "intermediário",
+  "focusAreas": ["automação", "integração", "produtividade"],
+  "avoidTopics": ["marketing", "buzzwords"],
+
+  "model": "llama-3.3-70b-versatile",
+  "temperature": 0.6,
+  "maxTokens": 600,
+
+  "dryRun": false,
+  "autoPublish": false,
+  "requireConfirmation": true
+}
