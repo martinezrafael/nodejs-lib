@@ -32,5 +32,9 @@
 
   "dryRun": false,
   "autoPublish": false,
-  "requireConfirmation": true
+  "requireConfirmation": true,
+
+  "image": {
+    "path": "images/post.png"
+  }
 }

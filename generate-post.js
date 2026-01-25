@@ -1,53 +1,130 @@
-import "dotenv/config";
-import OpenAI from "openai";
-import { execSync } from "child_process";
-import axios from "axios";
-import readline from "readline";
 import fs from "fs";
+import path from "path";
+import axios from "axios";
+import FormData from "form-data";
+import dotenv from "dotenv";
+import readline from "readline";
+import { execSync } from "child_process";
+import OpenAI from "openai";
 
-/**
- * =========================
- * Carregar Prompt Config
- * =========================
- */
+dotenv.config();
+
+/* --------------------------------------------------
+ * Paths & Constants
+ * -------------------------------------------------- */
+
+const LINKEDIN_API = "https://api.linkedin.com/v2";
+const ROOT_DIR = process.cwd();
+const IMAGES_DIR = path.join(ROOT_DIR, "images");
+const PROMPT_CONFIG_PATH = path.join(ROOT_DIR, "prompt.config.json");
+
+/* --------------------------------------------------
+ * Load prompt.config.json
+ * -------------------------------------------------- */
+
 function loadPromptConfig() {
   try {
-    return JSON.parse(fs.readFileSync("./prompt.config.json", "utf-8"));
-  } catch {
+    return JSON.parse(fs.readFileSync(PROMPT_CONFIG_PATH, "utf-8"));
+  } catch (err) {
     console.error("❌ Erro ao carregar prompt.config.json");
+    console.error(err.message);
     process.exit(1);
   }
 }
 
-const config = loadPromptConfig();
+const promptConfig = loadPromptConfig();
 
-/**
- * =========================
- * Configuração Groq
- * =========================
- */
+/* --------------------------------------------------
+ * LLM (Groq / OpenAI-compatible)
+ * -------------------------------------------------- */
+
 const groq = new OpenAI({
   apiKey: process.env.GROQ_API_KEY,
   baseURL: "https://api.groq.com/openai/v1",
 });
 
-/**
- * =========================
- * Configuração LinkedIn
- * =========================
- */
-const LINKEDIN_ACCESS_TOKEN = process.env.LINKEDIN_ACCESS_TOKEN;
+/* --------------------------------------------------
+ * Axios (LinkedIn)
+ * -------------------------------------------------- */
 
-if (!LINKEDIN_ACCESS_TOKEN && !config.dryRun) {
-  console.error("❌ LINKEDIN_ACCESS_TOKEN não configurado.");
-  process.exit(1);
+const axiosInstance = axios.create({
+  timeout: 20000,
+  headers: {
+    Authorization: `Bearer ${process.env.LINKEDIN_ACCESS_TOKEN}`,
+    "X-Restli-Protocol-Version": "2.0.0",
+  },
+});
+
+/* --------------------------------------------------
+ * Utils
+ * -------------------------------------------------- */
+
+function getLatestImageFromFolder(folderPath) {
+  if (!fs.existsSync(folderPath)) {
+    throw new Error(`Pasta de imagens não encontrada: ${folderPath}`);
+  }
+
+  const images = fs
+    .readdirSync(folderPath)
+    .filter((file) => /^image-\d+\.(png|jpe?g|webp)$/i.test(file))
+    .sort((a, b) => {
+      const na = Number(a.match(/\d+/)[0]);
+      const nb = Number(b.match(/\d+/)[0]);
+      return na - nb;
+    });
+
+  if (images.length === 0) {
+    throw new Error("Nenhuma imagem encontrada no padrão image-X");
+  }
+
+  return path.join(folderPath, images.at(-1));
 }
 
-/**
- * =========================
+function askConfirmation(question) {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  return new Promise((resolve) => {
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(answer.trim().toLowerCase());
+    });
+  });
+}
+
+async function retry(fn, retries = 3) {
+  let lastError;
+
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      console.warn(`⚠️ Tentativa ${i + 1}/${retries} falhou`);
+
+      if (err.response) {
+        console.error("📛 Status:", err.response.status);
+        console.error(
+          "📛 Resposta:",
+          JSON.stringify(err.response.data, null, 2),
+        );
+      } else if (err.request) {
+        console.error("📛 Conexão encerrada pelo LinkedIn");
+      } else {
+        console.error("📛 Erro:", err);
+      }
+    }
+  }
+
+  throw lastError;
+}
+
+/* --------------------------------------------------
  * Prompt Builders
- * =========================
- */
+ * -------------------------------------------------- */
+
 function buildSystemPrompt(cfg) {
   return `
 Você é um desenvolvedor experiente que escreve posts técnicos para o LinkedIn.
@@ -57,66 +134,107 @@ Público-alvo: ${cfg.audience}
 Tom: ${cfg.tone}
 Nível técnico: ${cfg.technicalDepth}
 
-Regras obrigatórias:
-- NÃO use buzzwords ou marketing vazio
-- NÃO aborde estes temas: ${cfg.avoidTopics.join(", ")}
-- NÃO invente tecnologias que não apareçam no código
-- Emojis: ${cfg.useEmojis ? `permitidos (densidade ${cfg.emojiDensity})` : "não usar"}
-- Bullet points: ${cfg.useBulletPoints ? `máx ${cfg.maxBulletPoints}` : "não usar"}
-- Hashtags: ${
-    cfg.useHashtags
-      ? `modo ${cfg.hashtags.mode}, máx ${cfg.hashtags.max}`
-      : "não usar"
-  }
-
-Estrutura obrigatória:
-${cfg.useTitle ? "- Título curto\n" : ""}- Abertura objetiva
-- Resumo técnico
-${cfg.useBulletPoints ? "- Lista de mudanças\n" : ""}
-${cfg.includeNextSteps ? "- Próximos passos\n" : ""}
-${cfg.includeCallToAction ? "- Call to action\n" : ""}
+Regras:
+- Nada de buzzword
+- Nada inventado
 - Hashtags no final
-`;
+`.trim();
 }
 
 function buildUserPrompt(cfg, diff) {
   return `
-Objetivo do post:
-Explicar alterações técnicas focadas em ${cfg.focusAreas.join(", ")}.
-
-Detalhamento:
-- Nível de detalhe: ${cfg.detailLevel}
-- Tamanho do post: ${cfg.postLength}
-
-${
-  cfg.includeCallToAction
-    ? `Call to action desejado: "${cfg.callToActionText}"`
-    : ""
-}
+Explique as alterações técnicas com foco em ${cfg.focusAreas.join(", ")}.
 
 Diff do código:
-${diff.substring(0, 2000)}
-`;
+${diff.slice(0, 2000)}
+`.trim();
 }
 
-/**
- * =========================
- * LinkedIn helpers
- * =========================
- */
-async function getPersonUrn() {
-  const { data } = await axios.get("https://api.linkedin.com/v2/userinfo", {
-    headers: { Authorization: `Bearer ${LINKEDIN_ACCESS_TOKEN}` },
+/* --------------------------------------------------
+ * IA – gerar post
+ * -------------------------------------------------- */
+
+async function generatePostFromDiff(diff) {
+  const completion = await groq.chat.completions.create({
+    model: promptConfig.model,
+    temperature: promptConfig.temperature,
+    max_tokens: promptConfig.maxTokens,
+    messages: [
+      { role: "system", content: buildSystemPrompt(promptConfig) },
+      { role: "user", content: buildUserPrompt(promptConfig, diff) },
+    ],
   });
 
-  return `urn:li:person:${data.sub}`;
+  return completion.choices[0].message.content.trim();
 }
 
-async function postToLinkedIn(authorUrn, text) {
-  return axios.post(
-    "https://api.linkedin.com/v2/ugcPosts",
-    {
-      author: authorUrn,
+/* --------------------------------------------------
+ * LinkedIn API
+ * -------------------------------------------------- */
+
+async function getPersonUrn() {
+  const res = await retry(() => axiosInstance.get(`${LINKEDIN_API}/userinfo`));
+
+  return `urn:li:person:${res.data.sub}`;
+}
+
+async function uploadImage(personUrn, imagePath) {
+  const registerRes = await retry(() =>
+    axiosInstance.post(`${LINKEDIN_API}/assets?action=registerUpload`, {
+      registerUploadRequest: {
+        owner: personUrn,
+        recipes: ["urn:li:digitalmediaRecipe:feedshare-image"],
+        serviceRelationships: [
+          {
+            relationshipType: "OWNER",
+            identifier: "urn:li:userGeneratedContent",
+          },
+        ],
+      },
+    }),
+  );
+
+  const uploadData =
+    registerRes.data.value.uploadMechanism[
+      "com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest"
+    ];
+
+  const assetUrn = registerRes.data.value.asset;
+
+  const form = new FormData();
+  form.append("file", fs.createReadStream(imagePath));
+
+  await axios.post(uploadData.uploadUrl, form, {
+    headers: form.getHeaders(),
+    maxBodyLength: Infinity,
+  });
+
+  return assetUrn;
+}
+
+async function createPostWithImage(personUrn, text, assetUrn) {
+  return retry(() =>
+    axiosInstance.post(`${LINKEDIN_API}/ugcPosts`, {
+      author: personUrn,
+      lifecycleState: "PUBLISHED",
+      specificContent: {
+        "com.linkedin.ugc.ShareContent": {
+          shareCommentary: { text },
+          shareMediaCategory: "IMAGE",
+          media: [{ status: "READY", media: assetUrn }],
+        },
+      },
+      visibility: {
+        "com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC",
+      },
+    }),
+  );
+}
+
+async function createTextOnlyPost(personUrn, text) {
+  return retry(() =>
+    axiosInstance.post(`${LINKEDIN_API}/ugcPosts`, {
+      author: personUrn,
       lifecycleState: "PUBLISHED",
       specificContent: {
         "com.linkedin.ugc.ShareContent": {
@@ -127,77 +245,64 @@ async function postToLinkedIn(authorUrn, text) {
       visibility: {
         "com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC",
       },
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${LINKEDIN_ACCESS_TOKEN}`,
-        "X-Restli-Protocol-Version": "2.0.0",
-        "Content-Type": "application/json",
-      },
-    },
+    }),
   );
 }
 
-/**
- * =========================
- * Execução principal
- * =========================
- */
+/* --------------------------------------------------
+ * Main
+ * -------------------------------------------------- */
+
 async function run() {
   const diff = execSync("git diff --cached").toString();
 
   if (!diff.trim()) {
-    console.log("⚠️ Nada no stage! Use git add.");
+    console.log("⚠️ Nenhuma alteração no stage.");
     return;
   }
-
-  const systemPrompt = buildSystemPrompt(config);
-  const userPrompt = buildUserPrompt(config, diff);
 
   console.log("🤖 Gerando post com IA...");
+  const postText = await generatePostFromDiff(diff);
 
-  const chat = await groq.chat.completions.create({
-    model: config.model,
-    temperature: config.temperature,
-    max_tokens: config.maxTokens,
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt },
-    ],
-  });
+  console.log("\n--- 📝 PRÉ-VISUALIZAÇÃO ---\n");
+  console.log(postText);
+  console.log("\n--------------------------\n");
 
-  const post = chat.choices[0].message.content;
+  const imagePath = getLatestImageFromFolder(IMAGES_DIR);
+  console.log("🖼 Imagem:", imagePath);
 
-  console.log("\n--- 📝 POST GERADO ---\n");
-  console.log(post);
-  console.log("\n---------------------");
+  if (promptConfig.requireConfirmation && !promptConfig.autoPublish) {
+    const answer = await askConfirmation(
+      "\n👉 Deseja publicar no LinkedIn? (y/n): ",
+    );
 
-  if (config.dryRun) {
-    console.log("🧪 Dry-run ativo. Nada será publicado.");
+    if (!["y", "yes"].includes(answer)) {
+      console.log("❌ Cancelado.");
+      return;
+    }
+  }
+
+  if (promptConfig.dryRun) {
+    console.log("🧪 Dry-run ativo.");
     return;
   }
 
-  if (!config.autoPublish && config.requireConfirmation) {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
+  console.log("🚀 Publicando...");
 
-    rl.question("\n🚀 Publicar no LinkedIn? (s/n): ", async (ans) => {
-      if (ans.toLowerCase() === "s") {
-        const urn = await getPersonUrn();
-        await postToLinkedIn(urn, post);
-        console.log("✅ Post publicado!");
-      } else {
-        console.log("❌ Publicação cancelada.");
-      }
-      rl.close();
-    });
-  } else {
-    const urn = await getPersonUrn();
-    await postToLinkedIn(urn, post);
-    console.log("✅ Post publicado automaticamente!");
+  const personUrn = await getPersonUrn();
+
+  try {
+    const assetUrn = await uploadImage(personUrn, imagePath);
+    await createPostWithImage(personUrn, postText, assetUrn);
+    console.log("✅ Post publicado com imagem!");
+  } catch (err) {
+    console.warn("⚠️ Falha ao publicar com imagem. Fallback para texto...");
+    await createTextOnlyPost(personUrn, postText);
+    console.log("✅ Post publicado SOMENTE com texto.");
   }
 }
 
-run();
+run().catch((err) => {
+  console.error("🔥 Erro fatal:", err);
+  process.exit(1);
+});
